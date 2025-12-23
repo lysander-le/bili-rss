@@ -28,7 +28,7 @@ def generate_rss(uid):
     
     try:
         driver.get(url)
-        time.sleep(5) # 等待加载
+        time.sleep(25) # 等待加载
         
         # 1. 获取 UP 主名字 (尝试多种位置)
         try:
