@@ -1,6 +1,5 @@
 import os
 import time
-import json
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -8,70 +7,42 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from feedgen.feed import FeedGenerator
 
-# --- 配置区 ---
+# --- 配置 ---
 OUTPUT_DIR = 'output'
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# 记录日志的函数
-def log_message(msg):
-    print(msg)
-    with open(os.path.join(OUTPUT_DIR, 'debug_log.txt'), 'a', encoding='utf-8') as f:
-        f.write(msg + '\n')
-
-# 初始化日志
-if os.path.exists(os.path.join(OUTPUT_DIR, 'debug_log.txt')):
-    os.remove(os.path.join(OUTPUT_DIR, 'debug_log.txt'))
-log_message("🚀 脚本开始运行...")
-
-# --- 核心：最强伪装配置 ---
+# --- 浏览器伪装 ---
 chrome_options = Options()
-chrome_options.add_argument("--headless") 
+chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
-# 禁用自动化栏
-chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-chrome_options.add_experimental_option('useAutomationExtension', False)
-# 伪装 User-Agent
+# 模拟普通 Mac 电脑访问
 chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-# 移除 navigator.webdriver 特征
-driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-    "source": """
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined
-    })
-  """
-})
-
 def generate_rss(uid):
     url = f'https://space.bilibili.com/{uid}/video'
-    log_message(f"--------------------------------")
-    log_message(f"🕵️ 正在抓取 UID: {uid}")
+    print(f"🕵️ 正在抓取 UID: {uid}")
     
     try:
         driver.get(url)
         time.sleep(5) # 等待加载
         
-        # 调试：打印一下网页标题，看看是不是被拦截了
-        page_title = driver.title
-        log_message(f"📄 网页标题: {page_title}")
-
-        # 尝试获取 UP 主名字
+        # 1. 获取 UP 主名字 (尝试多种位置)
         try:
             username = driver.find_element(By.ID, 'h-name').text
-            log_message(f"✅ 识别到UP主: {username}")
         except:
-            log_message("⚠️ 无法找到UP主名字，尝试备用选择器...")
             try:
-                username = driver.find_element(By.CSS_SELECTOR, '.h-name').text
+                username = driver.find_element(By.XPATH, '//*[@id="h-name"]').text
             except:
                 username = f"UID_{uid}"
-                log_message("❌ 彻底无法获取名字，使用默认 ID")
+                print("⚠️ 没找到名字，使用 ID 代替")
 
-        # 初始化 RSS
+        print(f"✅ UP主: {username}")
+
+        # 2. 初始化 RSS
         fg = FeedGenerator()
         fg.id(url)
         fg.title(f'{username} 的 Bilibili 动态')
@@ -79,59 +50,67 @@ def generate_rss(uid):
         fg.description(f'{username} 的最新视频')
         fg.language('zh-CN')
 
-        # 查找视频
-        videos = driver.find_elements(By.CSS_SELECTOR, '.small-item.fakeDanmu-item')
-        # 备用选择器
-        if not videos:
-             videos = driver.find_elements(By.CSS_SELECTOR, 'li.small-item')
+        # 3. 万能视频查找 (查找所有包含 video/BV 的链接)
+        # B站视频链接通常是 https://www.bilibili.com/video/BVxxxxx
+        video_elements = driver.find_elements(By.XPATH, '//a[contains(@href, "/video/BV")]')
         
-        log_message(f"🎬 找到视频数量: {len(videos)}")
+        # 去重 (因为有时候图片和标题都是链接，会重复)
+        seen_links = set()
+        count = 0
 
-        if len(videos) == 0:
-            log_message("⚠️ 警告: 0 个视频。可能是被 B 站拦截，或者页面结构改变。")
-            # 打印一点源码看看发生了什么
-            log_message(f"网页源码片段: {driver.page_source[:500]}")
-            return
-
-        for video in videos[:10]:
+        for video in video_elements:
+            if count >= 10: break # 只取前10个
+            
             try:
-                title_element = video.find_element(By.CSS_SELECTOR, '.title')
-                title = title_element.text
-                video_url = video.find_element(By.TAG_NAME, 'a').get_attribute('href')
+                video_url = video.get_attribute('href')
                 
+                # 过滤掉非视频链接或重复链接
+                if video_url in seen_links or 'javascript' in video_url:
+                    continue
+                
+                # 尝试获取标题
                 try:
-                    pub_time = video.find_element(By.CSS_SELECTOR, '.time').text
+                    # 只要链接里面包含文本，就认为是标题
+                    title = video.text
+                    if not title: # 如果链接没文字，可能是图片包裹的链接
+                        # 尝试找同级的 title 元素
+                        # 这里不做太复杂，如果没标题就跳过
+                        continue 
                 except:
-                    pub_time = "Recent"
+                    title = "New Video"
+
+                seen_links.add(video_url)
+                count += 1
 
                 fe = fg.add_entry()
                 fe.id(video_url)
                 fe.title(title)
                 fe.link(href=video_url)
-                fe.description(f'发布时间: {pub_time}<br><a href="{video_url}">点击观看</a>')
+                fe.description(f'<a href="{video_url}">点击观看: {title}</a>')
                 
             except Exception as e:
                 continue
 
-        rss_file = os.path.join(OUTPUT_DIR, f'{uid}.xml')
-        fg.rss_file(rss_file)
-        log_message(f"🎉 成功生成 RSS: {rss_file}")
+        print(f"🎬 成功提取 {count} 个视频")
+
+        # 只有提取到了才生成文件
+        if count > 0:
+            rss_file = os.path.join(OUTPUT_DIR, f'{uid}.xml')
+            fg.rss_file(rss_file)
+            print(f"🎉 生成 XML: {rss_file}")
+        else:
+            print("⚠️ 未找到有效视频链接")
 
     except Exception as e:
-        log_message(f"❌ 抓取过程报错: {str(e)}")
+        print(f"❌ 错误: {e}")
 
 # 读取 UID
-id_file = 'ids.txt'
-if not os.path.exists(id_file):
-    log_message("❌ 致命错误: ids.txt 不存在！")
-else:
-    with open(id_file, 'r') as f:
+if os.path.exists('ids.txt'):
+    with open('ids.txt', 'r') as f:
         uids = [line.strip() for line in f if line.strip()]
-    
-    if not uids:
-        log_message("❌ ids.txt 是空的！请检查文件内容。")
-    
     for uid in uids:
         generate_rss(uid)
+else:
+    print("❌ ids.txt 不存在")
 
 driver.quit()
