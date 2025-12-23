@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -7,61 +8,89 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from feedgen.feed import FeedGenerator
 
-# 配置：输出文件夹
+# --- 配置区 ---
 OUTPUT_DIR = 'output'
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# --- 关键修改：增加伪装头，防止被B站拦截 ---
+# 记录日志的函数
+def log_message(msg):
+    print(msg)
+    with open(os.path.join(OUTPUT_DIR, 'debug_log.txt'), 'a', encoding='utf-8') as f:
+        f.write(msg + '\n')
+
+# 初始化日志
+if os.path.exists(os.path.join(OUTPUT_DIR, 'debug_log.txt')):
+    os.remove(os.path.join(OUTPUT_DIR, 'debug_log.txt'))
+log_message("🚀 脚本开始运行...")
+
+# --- 核心：最强伪装配置 ---
 chrome_options = Options()
-chrome_options.add_argument("--headless")  # 无头模式
+chrome_options.add_argument("--headless") 
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
-# 伪装成正常的 Windows Chrome 浏览器
-chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-chrome_options.add_argument("--window-size=1920,1080")
+# 禁用自动化栏
+chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+chrome_options.add_experimental_option('useAutomationExtension', False)
+# 伪装 User-Agent
+chrome_options.add_argument("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-# 初始化浏览器
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+# 移除 navigator.webdriver 特征
+driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+    "source": """
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined
+    })
+  """
+})
 
 def generate_rss(uid):
     url = f'https://space.bilibili.com/{uid}/video'
-    print(f"--------------------------------")
-    print(f"正在尝试抓取: {url}")
+    log_message(f"--------------------------------")
+    log_message(f"🕵️ 正在抓取 UID: {uid}")
     
     try:
         driver.get(url)
-        time.sleep(5) # 等待页面加载
+        time.sleep(5) # 等待加载
         
+        # 调试：打印一下网页标题，看看是不是被拦截了
+        page_title = driver.title
+        log_message(f"📄 网页标题: {page_title}")
+
         # 尝试获取 UP 主名字
         try:
             username = driver.find_element(By.ID, 'h-name').text
-            print(f"✅ 成功获取UP主: {username}")
+            log_message(f"✅ 识别到UP主: {username}")
         except:
-            print(f"❌ 无法获取UP主名字，可能是页面没加载出来。")
-            # 打印网页标题帮助调试
-            print(f"当前网页标题: {driver.title}")
-            return # 退出该UP主的抓取
+            log_message("⚠️ 无法找到UP主名字，尝试备用选择器...")
+            try:
+                username = driver.find_element(By.CSS_SELECTOR, '.h-name').text
+            except:
+                username = f"UID_{uid}"
+                log_message("❌ 彻底无法获取名字，使用默认 ID")
 
         # 初始化 RSS
         fg = FeedGenerator()
         fg.id(url)
         fg.title(f'{username} 的 Bilibili 动态')
-        fg.author({'name': username})
         fg.link(href=url, rel='alternate')
-        fg.description(f'{username} 的最新视频更新')
+        fg.description(f'{username} 的最新视频')
         fg.language('zh-CN')
 
         # 查找视频
-        # 尝试两种常见的 class，提高成功率
         videos = driver.find_elements(By.CSS_SELECTOR, '.small-item.fakeDanmu-item')
+        # 备用选择器
         if not videos:
              videos = driver.find_elements(By.CSS_SELECTOR, 'li.small-item')
-
-        print(f"🔍 找到视频数量: {len(videos)}")
+        
+        log_message(f"🎬 找到视频数量: {len(videos)}")
 
         if len(videos) == 0:
-            print("⚠️ 警告: 视频列表为空，可能是B站改版或反爬拦截。")
+            log_message("⚠️ 警告: 0 个视频。可能是被 B 站拦截，或者页面结构改变。")
+            # 打印一点源码看看发生了什么
+            log_message(f"网页源码片段: {driver.page_source[:500]}")
             return
 
         for video in videos[:10]:
@@ -70,50 +99,38 @@ def generate_rss(uid):
                 title = title_element.text
                 video_url = video.find_element(By.TAG_NAME, 'a').get_attribute('href')
                 
-                # 封面图
-                try:
-                    cover = video.find_element(By.TAG_NAME, 'img').get_attribute('src')
-                    if not cover.startswith('http'):
-                        cover = 'https:' + cover
-                except:
-                    cover = ""
-
-                # 时间
                 try:
                     pub_time = video.find_element(By.CSS_SELECTOR, '.time').text
                 except:
-                    pub_time = "Recently"
+                    pub_time = "Recent"
 
                 fe = fg.add_entry()
                 fe.id(video_url)
                 fe.title(title)
                 fe.link(href=video_url)
-                fe.description(f'<img src="{cover}"><br>发布时间: {pub_time}<br><a href="{video_url}">点击观看</a>')
+                fe.description(f'发布时间: {pub_time}<br><a href="{video_url}">点击观看</a>')
                 
             except Exception as e:
                 continue
 
-        # 只有确实抓到了视频才生成文件
         rss_file = os.path.join(OUTPUT_DIR, f'{uid}.xml')
         fg.rss_file(rss_file)
-        print(f"🎉 成功生成文件: {rss_file}")
+        log_message(f"🎉 成功生成 RSS: {rss_file}")
 
     except Exception as e:
-        print(f"❌ 抓取过程发生未知错误: {e}")
+        log_message(f"❌ 抓取过程报错: {str(e)}")
 
 # 读取 UID
-# 增加容错：防止文件不存在
-if not os.path.exists('ids.txt'):
-    print("❌ 错误: 找不到 ids.txt 文件！请确保你创建了这个文件。")
+id_file = 'ids.txt'
+if not os.path.exists(id_file):
+    log_message("❌ 致命错误: ids.txt 不存在！")
 else:
-    with open('ids.txt', 'r') as f:
+    with open(id_file, 'r') as f:
         uids = [line.strip() for line in f if line.strip()]
-
-    print(f"📋 待抓取 UID 列表: {uids}")
     
     if not uids:
-        print("❌ 错误: ids.txt 是空的！请填入 UP 主 UID。")
-
+        log_message("❌ ids.txt 是空的！请检查文件内容。")
+    
     for uid in uids:
         generate_rss(uid)
 
