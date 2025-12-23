@@ -30,7 +30,8 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add output/*.xml
-          # 如果没有更新，不报错直接退出
-          git commit -m "Auto update RSS feed" || exit 0
+          # 强制把所有 output 下的文件加入（包括日志）
+          git add output/
+          # 只有当有东西可以提交时才提交，否则安静退出
+          git commit -m "Auto update RSS feed" || echo "⚠️ Nothing to commit"
           git push
